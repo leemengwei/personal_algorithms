@@ -112,3 +112,5 @@ cad/
 *.pkl
 *.pt
 *.pth
+
+*.csv

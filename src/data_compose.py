@@ -6,11 +6,13 @@ import pandas as pd
 from IPython import embed
 import cv2
 from matplotlib.patches import Circle
+import csv2labelme
+import labelme2coco
 
-def get_data(data_path):
+def get_data(data_path, individual_resolution_height, individual_resolution_width):
     data = cv2.imread(data_path)
-    data = cv2.resize(data, (150,150))
-    return data[:,:,[2,1,0]]
+    data = cv2.resize(data, (individual_resolution_width, individual_resolution_height))
+    return data
 
 def get_affine(data):
     randomer1 = 1+0.05*np.random.randn()
@@ -25,7 +27,7 @@ def get_affine(data):
     data = cv2.warpAffine(data, M, (width, height))
     return data
 
-def get_perspective(data, fac=0.025):
+def get_perspective(data, fac=0.01):
     randomer1 = 1+fac*np.random.randn()
     randomer2 = 1+fac*np.random.randn()
     randomer3 = 1+fac*np.random.randn()
@@ -43,15 +45,17 @@ def get_perspective(data, fac=0.025):
 
 def get_direction_rotate(data):
     randomer = np.random.randint(4)
+    if data.shape[0]!=data.shape[1]:randomer*=2    #如果长宽不等则不能转1/4圈
     height, width, channel  = data.shape
     M = cv2.getRotationMatrix2D(((width-1)/2.0,(height-1)/2.0),90*randomer,1)
     data = cv2.warpAffine(data,M,(width,height))
     return data
 
-def get_turb_rotate(data, fac=1.5):
+def get_turb_rotate(data, fac=1):
+    data = get_direction_rotate(data)
     randomer = 0+fac*np.random.randn()
     height, width, channel  = data.shape
-    M = cv2.getRotationMatrix2D(((width-1)/2.0,(height-1)/2.0),90+randomer,1)
+    M = cv2.getRotationMatrix2D(((width-1)/2.0,(height-1)/2.0), randomer, 1)
     data = cv2.warpAffine(data,M,(width,height))
     return data
 
@@ -137,24 +141,6 @@ def get_contrast(src1):
     dst = cv2.addWeighted(src1, 1, src2, 0, randomer)
     return dst
 
-def get_ADR(data):   #Automatic domain randomization
-    #morphology:
-    data = get_open_close(data)
-    data = get_bifilter(data)
-    data = get_contrast(data)
-    data = get_brightness(data)
-    data, _ = get_backlight(data)
-
-    #Seq matters:
-    #Geometry:
-    data = get_translation(data)
-    data = get_perspective(data)
-    data = get_turb_rotate(data)
-    
-
-    data = get_direction_rotate(data)
-    return data
-
 def get_backlight(data, individual=True):    #Serves as vein render for individual
     status = True
     fac = 2 if individual else 10   #vein
@@ -193,7 +179,55 @@ def get_backlight(data, individual=True):    #Serves as vein render for individu
             break
     return tmp_data, status
 
-def generate(num_in_row, num_in_col, data_cad):
+###############################################################################################
+
+def get_ADR(data):   #Automatic domain randomization
+    #morphology:
+    data = get_open_close(data)
+    data = get_bifilter(data)
+    data = get_contrast(data)
+    data = get_brightness(data)
+    data, _ = get_backlight(data)
+
+    #Seq matters:
+    #Geometry:
+    data = get_translation(data)
+    data = get_perspective(data)
+    data = get_turb_rotate(data)
+
+    return data
+
+def get_json(num_in_col, num_in_row, individual_resolution_width, individual_resolution_height, figname):
+    anno_noise = 0.05
+    json_width = np.arange(int(individual_resolution_width/2), num_in_col*individual_resolution_width, individual_resolution_width)
+    json_height = np.arange(int(individual_resolution_height/2), num_in_row*individual_resolution_height, individual_resolution_height)
+    #center to boundary
+    top_x = json_width-individual_resolution_width/2
+    top_y = json_height-individual_resolution_height/2
+    bottom_x = json_width+individual_resolution_width/2
+    bottom_y = json_height+individual_resolution_height/2
+    #meshgrid
+    json_X1, json_Y1 = np.meshgrid(top_x, top_y)
+    json_X2, json_Y2 = np.meshgrid(bottom_x, bottom_y)
+    json_X1, json_Y1, json_X2, json_Y2 = json_X1.flatten(), json_Y1.flatten(), json_X2.flatten(), json_Y2.flatten()
+    #Add salt:
+    json_X1 = np.clip(json_X1 - np.abs(anno_noise*individual_resolution_width*np.random.randn(len(json_X1))), 0, num_in_col*individual_resolution_width)
+    json_Y1 = np.clip(json_Y1 - np.abs(anno_noise*individual_resolution_height*np.random.randn(len(json_Y1))), 0, num_in_row*individual_resolution_height)
+    json_X2 = np.clip(json_X2 + np.abs(anno_noise*individual_resolution_width*np.random.randn(len(json_X2))), 0, num_in_col*individual_resolution_width)
+    json_Y2 = np.clip(json_Y2 + np.abs(anno_noise*individual_resolution_height*np.random.randn(len(json_Y2))), 0, num_in_row*individual_resolution_height)
+
+    content = np.round(np.vstack((json_X1, json_Y1, json_X2, json_Y2)).T)
+    jsons = pd.DataFrame(content.astype(int), columns=[1,2,3,4])
+    jsons['path'] = figname+".jpg"
+    jsons['class'] = "brick"
+    jsons = jsons[['path',1,2,3,4, "class"]]
+    jsons.to_csv("../data_generation/%s.csv"%figname, header=None, index=None)
+    print("Saving ../data_generation/%s.json"%figname)
+    return json_X1, json_Y1, json_X2, json_Y2    
+
+def generate_img_and_json(num_in_row, num_in_col, data_cad, individual_resolution_height, individual_resolution_width):
+    height, width, channel  = data_cad[0].shape
+    #Image data:
     base = np.empty(shape=(height, 0, 3))
     for i in range(num_in_row*num_in_col):
         which = np.random.randint(len(data_name))
@@ -211,15 +245,22 @@ def generate(num_in_row, num_in_col, data_cad):
     index = index.astype(int)
     base = base[index.argsort()]
 
-#    base = get_perspective(base, 0.05)
+    #base = get_perspective(base, 0.05)
     base, status = get_backlight(base, individual = False)
 
-    plt.figure(figsize=(10,10))
-    plt.imshow(base)
+    plt.imshow(base[:,:,[2,1,0]])
     num = str(len(glob.glob("../data_generation/*.jpg"))).zfill(5)
-    plt.savefig("../data_generation/generate_%s.jpg"%num)
-    print("Saving ../data_generation/generate_%s.jpg"%num)
-    return
+    figname = "generate_%s"%num
+    cv2.imwrite("../data_generation/%s.jpg"%figname, base)
+    print("Saving ../data_generation/%s.jpg"%figname)
+
+    #Get Json:
+    json_X1, json_Y1, json_X2, json_Y2 = get_json(num_in_col, num_in_row, individual_resolution_width, individual_resolution_height, figname)
+    plt.scatter(json_X1, json_Y1)
+    plt.scatter(json_X2, json_Y2)
+    #plt.show()
+    #embed()
+    return base, figname
 
 
 if __name__ == "__main__":
@@ -228,19 +269,25 @@ if __name__ == "__main__":
     data_cad = {}
     data_name = ["1_1.jpg", "2_2.jpg","1.jpg", "2.jpg"]
     #data_name = ["1.jpg"]
+    individual_resolution_height = 100
+    individual_resolution_width = 100
     for idx,i in enumerate(data_name):
-        data_cad[idx] = get_data('../cad/'+i)
-    height, width, channel  = data_cad[idx].shape
+        data_cad[idx] = get_data('../cad/'+i, individual_resolution_height=individual_resolution_height, individual_resolution_width=individual_resolution_width)
     distance_cad = 0.1   #m
     
     #Generate!
     num_in_col = 12
     num_in_row = 18
     
-    for i in range(100):
-        generate(num_in_row, num_in_col, data_cad)
-    
-#    embed()
+    for i in range(10):
+        base,figname = generate_img_and_json(num_in_row, num_in_col, data_cad, individual_resolution_height, individual_resolution_width)
+	#Convert csv to labelme json:
+        csv2labelme.single_csv_to_labelme_json("../data_generation/", "../data_generation/%s.csv"%figname)
+        #Convert labelme json to coco:
+        labelme2coco.labelme2coco(glob.glob('../data_generation/*.json'), 'output_coco.json', None, None, {'brick':1})
+
+
+    #embed()
 
 
 
