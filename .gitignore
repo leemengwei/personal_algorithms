@@ -103,3 +103,12 @@ venv.bak/
 # mypy
 .mypy_cache/
 data/
+data_generate/
+cad/
+*.png
+*.jpg
+*.jpeg
+*.json
+*.pkl
+*.pt
+*.pth
